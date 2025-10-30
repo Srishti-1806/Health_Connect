@@ -1,123 +1,116 @@
+import PyPDF2
+from transformers import pipeline
 import os
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import FileResponse, JSONResponse
-from PyPDF2 import PdfReader
-from dotenv import load_dotenv
-from fpdf import FPDF
-import tempfile
+import re
 
-from langchain.text_splitter import CharacterTextSplitter
-from langchain.embeddings import HuggingFaceEmbeddings
-from langchain.vectorstores import Chroma
-from langchain.chains.question_answering import load_qa_chain
-from langchain_groq import ChatGroq
+def sanitize_ascii(text):
+    # Replace smart quotes and dashes with ASCII equivalents
+    text = text.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
+    text = text.replace("–", "-").replace("—", "-")
+    # Remove any remaining non-ASCII characters
+    return re.sub(r"[^\x00-\x7F]+", "", text)
 
-app = FastAPI(title="Groq PDF Summarizer API", version="1.0")
+class PDFSummarizer:
+    def extract_text_from_pdf(self, pdf_path):
+        """Extract text from PDF file"""
+        pdf_text = ""
+        try:
+            with open(pdf_path, "rb") as file:
+                reader = PyPDF2.PdfReader(file)
+                for page in reader.pages:
+                    page_text = page.extract_text()
+                    if page_text:
+                        pdf_text += page_text + "\n"
+        except Exception as e:
+            raise Exception(f"Error extracting text from PDF: {str(e)}")
+        return pdf_text
 
-# Load Groq API key from .env
-def load_groq_api_key():
-    dotenv_path = "groq.env"
-    load_dotenv(dotenv_path)
-    groq_api_key = os.getenv("GROQ_API_KEY")
-    if not groq_api_key:
-        raise ValueError(f"Unable to retrieve GROQ_API_KEY from {dotenv_path}")
-    return groq_api_key
+    def summarize_text(self, text, max_chunk=1000):
+        """Summarize text using transformers pipeline"""
+        try:
+            summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
+            summary = ""
+            for i in range(0, len(text), max_chunk):
+                chunk = text[i:i+max_chunk]
+                if len(chunk.strip()) < 50:
+                    continue
+                summary_piece = summarizer(
+                    chunk,
+                    max_length=20,
+                    min_length=10,
+                    do_sample=False
+                )[0]['summary_text']
+                summary += summary_piece + "\n\n"
+        except Exception as e:
+            raise Exception(f"Error summarizing text: {str(e)}")
+        return summary.strip()
 
-# Text chunking + vector store
-def process_text(text):
-    text_splitter = CharacterTextSplitter(
-        separator="\n",
-        chunk_size=1000,
-        chunk_overlap=200,
-        length_function=len
-    )
-    chunks = text_splitter.split_text(text)
-    embeddings = HuggingFaceEmbeddings(model_name='sentence-transformers/all-MiniLM-L6-v2')
-    knowledge_base = Chroma.from_texts(chunks, embeddings)
-    return knowledge_base
-
-# Generate summary PDF
-def generate_pdf(summary_text):
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", size=12)
-    pdf.multi_cell(0, 10, txt="PDF Summary", align="L")
-    pdf.ln(5)
-
-    for line in summary_text.split('\n'):
-        if line.strip():
-            pdf.multi_cell(0, 10, txt=f"• {line.strip()}", align="L")
-
-    output_path = os.path.join(tempfile.gettempdir(), "summary_output.pdf")
-    pdf.output(output_path)
-    return output_path
-
-@app.on_event("startup")
-def startup_event():
-    try:
-        os.environ["GROQ_API_KEY"] = load_groq_api_key()
-        print("✅ Groq API key loaded successfully.")
-    except ValueError as e:
-        print("❌", str(e))
-
-@app.post("/api/summarize")
-async def summarize_pdf(file: UploadFile = File(...)):
-    if not file.filename.endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are supported.")
-
-    try:
-        # Read PDF content
-        pdf_reader = PdfReader(file.file)
-        text = ""
-        for page in pdf_reader.pages:
-            extracted = page.extract_text()
-            if extracted:
-                text += extracted
-
+    def summarize_pdf(self, pdf_path):
+        """Main function to summarize PDF"""
+        print("Extracting text from PDF...")
+        text = self.extract_text_from_pdf(pdf_path)
         if not text.strip():
-            raise HTTPException(status_code=400, detail="No readable text found in the PDF.")
-
-        # Process and summarize
-        knowledge_base = process_text(text)
-        query = (
-            "Summarize the content of the uploaded PDF file in approximately 3-5 sentences. "
-            "Focus on capturing the main ideas and key points discussed in the document. "
-            "Use your own words and ensure clarity and coherence in the summary."
-        )
-
-        docs = knowledge_base.similarity_search(query)
-
-        llm = ChatGroq(
-            groq_api_key=os.getenv("GROQ_API_KEY"),
-            model_name="llama3-70b-8192",
-            temperature=0.1
-        )
-
-        chain = load_qa_chain(llm, chain_type='stuff')
-        response = chain.run(input_documents=docs, question=query)
-
-        # Generate PDF
-        pdf_path = generate_pdf(response)
-
+            raise Exception("No text found in PDF")
+        print("Summarizing text...")
+        summary = self.summarize_text(text)
+        generated_path = self.generate_summary_pdf(text, summary)
         return {
-            "summary": response,
-            "pdf_path": pdf_path
+            "original_text": text,
+            "summary": summary,
+            "word_count_original": len(text.split()),
+            "word_count_summary": len(summary.split()),
+            "compressed_ratio": len(summary.split())/len(text.split())*100,
+            "pdf_path": generated_path
         }
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    def generate_summary_pdf(self, original_text, summary):
+        """Generate a PDF report with original and summarized text"""
+        from fpdf import FPDF
 
-@app.get("/api/download")
-async def download_summary():
-    pdf_path = os.path.join(tempfile.gettempdir(), "summary_output.pdf")
-    if not os.path.exists(pdf_path):
-        raise HTTPException(status_code=404, detail="Summary PDF not found.")
-    return FileResponse(pdf_path, filename="summary.pdf", media_type="application/pdf")
+        # Sanitize all text to ASCII
+        original_text = sanitize_ascii(original_text)
+        summary = sanitize_ascii(summary)
 
-@app.get("/")
-def root():
-    return {"message": "📄 Groq PDF Summarizer API is running!"}
+        pdf = FPDF()
+        pdf.add_page()
+        pdf.set_font("helvetica", size=12)
+
+        # Title
+        pdf.set_font("helvetica", 'B', size=16)
+        pdf.cell(200, 10, "PDF Summary Report", ln=1, align='C')
+        pdf.ln(5)
+
+        # Summary section
+        pdf.set_font("helvetica", 'B', size=14)
+        pdf.cell(0, 10, "Summary:", ln=1)
+        pdf.set_font("helvetica", size=11)
+        pdf.multi_cell(0, 8, summary)
+        pdf.ln(5)
+
+        # Statistics
+        pdf.set_font("helvetica", 'B', size=12)
+        pdf.cell(0, 10, "Statistics:", ln=1)
+        pdf.set_font("helvetica", size=10)
+        pdf.cell(0, 8, f"Original word count: {len(original_text.split())}", ln=1)
+        pdf.cell(0, 8, f"Summary word count: {len(summary.split())}", ln=1)
+        compression = (len(summary.split())/len(original_text.split())*100) if original_text.strip() else 0.0
+        pdf.cell(0, 8, f"Compression ratio: {compression:.1f}%", ln=1)
+
+        final_path = os.path.join("public", "pdfs", "summary.pdf")
+        os.makedirs(os.path.dirname(final_path), exist_ok=True)
+        pdf.output(final_path)
+        return final_path
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    summarizer = PDFSummarizer()
+    test_pdf_path = "test.pdf"
+    try:
+        result = summarizer.summarize_pdf(test_pdf_path)
+        print("Summary:\n", result["summary"])
+        print("\nStatistics:")
+        print(f"Original word count: {result['word_count_original']}")
+        print(f"Summary word count: {result['word_count_summary']}")
+        print(f"Compression ratio: {result['compressed_ratio']:.1f}%")
+        print(f"Summary PDF saved at: {result['pdf_path']}")
+    except Exception as e:
+        print("Error:", e)

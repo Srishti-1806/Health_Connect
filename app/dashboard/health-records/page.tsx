@@ -9,8 +9,8 @@ import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { FileText, Upload, Download, Eye, Trash2, Search, Calendar } from 'lucide-react';
 
-// Mock data for health records
-const healthRecords = [
+// initial mock data (kept as initial state)
+const initialHealthRecords = [
   {
     id: 1,
     name: "Blood Test Results - May 2024",
@@ -19,7 +19,8 @@ const healthRecords = [
     doctor: "Dr. Sarah Johnson",
     summary: "Complete blood count and metabolic panel. All values within normal range.",
     fileSize: "2.3 MB",
-    status: "Reviewed"
+    status: "Reviewed",
+    summaryPdf: undefined
   },
   {
     id: 2,
@@ -29,7 +30,8 @@ const healthRecords = [
     doctor: "Dr. Michael Chen",
     summary: "Chest X-ray shows clear lungs with no signs of infection or abnormalities.",
     fileSize: "5.1 MB",
-    status: "Reviewed"
+    status: "Reviewed",
+    summaryPdf: undefined
   },
   {
     id: 3,
@@ -39,7 +41,8 @@ const healthRecords = [
     doctor: "Dr. Emily Rodriguez",
     summary: "Comprehensive physical examination. Patient in good health overall.",
     fileSize: "1.8 MB",
-    status: "Reviewed"
+    status: "Reviewed",
+    summaryPdf: undefined
   },
   {
     id: 4,
@@ -49,7 +52,8 @@ const healthRecords = [
     doctor: "Nurse Practitioner Lisa Wong",
     summary: "COVID-19 booster vaccination administered. No adverse reactions.",
     fileSize: "0.5 MB",
-    status: "Reviewed"
+    status: "Reviewed",
+    summaryPdf: undefined
   },
   {
     id: 5,
@@ -59,16 +63,22 @@ const healthRecords = [
     doctor: "Dr. Sarah Johnson",
     summary: "Updated prescription for blood pressure medication. Dosage adjusted.",
     fileSize: "0.8 MB",
-    status: "Pending Review"
+    status: "Pending Review",
+    summaryPdf: undefined
   }
 ];
 
 export default function HealthRecords() {
+  // use state for records now so uploaded summaries are added dynamically
+  const [records, setRecords] = useState(initialHealthRecords);
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedRecord, setSelectedRecord] = useState<number | null>(null);
   const [isUploading, setIsUploading] = useState(false);
-  
-  const filteredRecords = healthRecords.filter(record => 
+  const [uploadError, setUploadError] = useState<string | null>(null);
+
+  const API_BASE = "http://localhost:8000"; // change if summarizer runs elsewhere
+
+  const filteredRecords = records.filter(record => 
     record.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
     record.type.toLowerCase().includes(searchQuery.toLowerCase()) ||
     record.doctor.toLowerCase().includes(searchQuery.toLowerCase())
@@ -78,23 +88,73 @@ export default function HealthRecords() {
     const file = event.target.files?.[0];
     if (!file) return;
 
-    setIsUploading(true);
-    
-    try {
-      // Simulate file upload and PDF processing
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      
-      // Here you would typically upload the file and process it
-      console.log("File uploaded:", file.name);
-      
-      // Reset the input
+    // quick client-side validation
+    if (!file.name.toLowerCase().endsWith(".pdf")) {
+      setUploadError("Only PDF files are supported. Please upload a .pdf file.");
       event.target.value = "";
-    } catch (error) {
+      return;
+    }
+
+    setIsUploading(true);
+    setUploadError(null);
+
+    try {
+      const form = new FormData();
+      form.append("file", file);
+
+      console.log("Uploading file to summarizer:", `${API_BASE}/api/summarize`, file.name, file.size);
+      const res = await fetch(`${API_BASE}/api/summarize`, {
+        method: "POST",
+        body: form
+      });
+
+      if (!res.ok) {
+        // try to get JSON error detail, fall back to text
+        let errDetail = "Upload failed";
+        try {
+          const errJson = await res.json();
+          errDetail = errJson.detail || JSON.stringify(errJson);
+        } catch {
+          errDetail = await res.text().catch(() => `Status ${res.status}`);
+        }
+        console.error("Summarizer error response:", res.status, errDetail);
+        throw new Error(errDetail);
+      }
+
+      const data = await res.json();
+      console.log("Summarizer response:", data);
+
+      const newRecord = {
+        id: Date.now(),
+        name: file.name,
+        type: "Uploaded",
+        date: new Date().toISOString().split("T")[0],
+        doctor: "AI Summarizer",
+        summary: data.summary || "No summary returned",
+        fileSize: `${(file.size / 1024 / 1024).toFixed(1)} MB`,
+        status: "Reviewed",
+        summaryPdf: data.download_url // link to download generated PDF
+      };
+
+      setRecords(prev => [newRecord, ...prev]);
+      setSelectedRecord(newRecord.id);
+
+      // reset input
+      event.target.value = "";
+    } catch (error: any) {
       console.error("Upload error:", error);
+      setUploadError(error?.message || "Upload failed");
     } finally {
       setIsUploading(false);
     }
   };
+
+  const handleDownloadSummary = (url?: string) => {
+    if (!url) return;
+    window.open(url, "_blank");
+  };
+
+  const findRecord = (id: number | null) => records.find(r => r.id === id) || null;
 
   return (
     <div className="space-y-6">
@@ -106,7 +166,7 @@ export default function HealthRecords() {
         <div className="flex gap-2">
           <input
             type="file"
-            accept=".pdf,.jpg,.jpeg,.png"
+            accept=".pdf"
             onChange={handleFileUpload}
             className="hidden"
             id="file-upload"
@@ -126,6 +186,10 @@ export default function HealthRecords() {
           Upload your health records as PDF files. Our AI will automatically summarize the content for easy review.
         </AlertDescription>
       </Alert>
+
+      {uploadError && (
+        <div className="text-red-600 text-sm">{uploadError}</div>
+      )}
 
       <div className="relative">
         <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400" />
@@ -187,9 +251,9 @@ export default function HealthRecords() {
                         <Eye className="h-3 w-3" />
                         View
                       </Button>
-                      <Button size="sm" variant="outline" className="gap-1">
+                      <Button size="sm" variant="outline" className="gap-1" onClick={() => record.summaryPdf && handleDownloadSummary(record.summaryPdf)}>
                         <Download className="h-3 w-3" />
-                        Download
+                        {record.summaryPdf ? "Download Summary" : "Download"}
                       </Button>
                       <Button size="sm" variant="outline" className="gap-1 text-red-600 hover:text-red-700">
                         <Trash2 className="h-3 w-3" />
@@ -203,114 +267,127 @@ export default function HealthRecords() {
 
             <div className="hidden lg:block sticky top-6">
               {selectedRecord ? (
-                <Card>
-                  <CardHeader>
-                    <CardTitle>{healthRecords.find(r => r.id === selectedRecord)?.name}</CardTitle>
-                    <CardDescription>
-                      {healthRecords.find(r => r.id === selectedRecord)?.doctor} • {" "}
-                      {new Date(healthRecords.find(r => r.id === selectedRecord)?.date || "").toLocaleDateString()}
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent>
-                    <Tabs defaultValue="summary">
-                      <TabsList className="grid grid-cols-2 mb-4">
-                        <TabsTrigger value="summary">AI Summary</TabsTrigger>
-                        <TabsTrigger value="details">Details</TabsTrigger>
-                      </TabsList>
-                      
-                      <TabsContent value="summary">
-                        <div className="space-y-4">
-                          <div>
-                            <h4 className="text-sm font-medium mb-2">AI-Generated Summary</h4>
-                            <div className="p-4 bg-blue-50 rounded-lg">
-                              <p className="text-sm">
-                                {healthRecords.find(r => r.id === selectedRecord)?.summary}
-                              </p>
-                            </div>
-                          </div>
+                (() => {
+                  const r = findRecord(selectedRecord);
+                  return r ? (
+                    <Card>
+                      <CardHeader>
+                        <CardTitle>{r.name}</CardTitle>
+                        <CardDescription>
+                          {r.doctor} • {" "}
+                          {new Date(r.date || "").toLocaleDateString()}
+                        </CardDescription>
+                      </CardHeader>
+                      <CardContent>
+                        <Tabs defaultValue="summary">
+                          <TabsList className="grid grid-cols-2 mb-4">
+                            <TabsTrigger value="summary">AI Summary</TabsTrigger>
+                            <TabsTrigger value="details">Details</TabsTrigger>
+                          </TabsList>
                           
-                          <div>
-                            <h4 className="text-sm font-medium mb-2">Key Findings</h4>
-                            <ul className="text-sm space-y-1">
-                              <li>• All vital signs within normal range</li>
-                              <li>• No significant abnormalities detected</li>
-                              <li>• Recommended follow-up in 6 months</li>
-                            </ul>
-                          </div>
-                          
-                          <div>
-                            <h4 className="text-sm font-medium mb-2">Recommendations</h4>
-                            <ul className="text-sm space-y-1">
-                              <li>• Continue current medication regimen</li>
-                              <li>• Maintain healthy diet and exercise</li>
-                              <li>• Schedule routine follow-up appointment</li>
-                            </ul>
-                          </div>
-                        </div>
-                      </TabsContent>
-                      
-                      <TabsContent value="details">
-                        <div className="space-y-4">
-                          <div>
-                            <h4 className="text-sm font-medium mb-2">Document Information</h4>
-                            <div className="text-sm space-y-2">
-                              <div className="flex justify-between">
-                                <span>Type:</span>
-                                <span>{healthRecords.find(r => r.id === selectedRecord)?.type}</span>
+                          <TabsContent value="summary">
+                            <div className="space-y-4">
+                              <div>
+                                <h4 className="text-sm font-medium mb-2">AI-Generated Summary</h4>
+                                <div className="p-4 bg-black rounded-lg">
+                                  <p className="text-sm text-white">
+                                    {r.summary}
+                                  </p>
+                                </div>
+                                {r.summaryPdf && (
+                                  <div className="mt-3">
+                                    <Button size="sm" onClick={() => handleDownloadSummary(r.summaryPdf)}>
+                                      <Download className="h-3 w-3 mr-2" />
+                                      Download AI Summary (PDF)
+                                    </Button>
+                                  </div>
+                                )}
                               </div>
-                              <div className="flex justify-between">
-                                <span>Date:</span>
-                                <span>{new Date(healthRecords.find(r => r.id === selectedRecord)?.date || "").toLocaleDateString()}</span>
+                              
+                              <div>
+                                <h4 className="text-sm font-medium mb-2">Key Findings</h4>
+                                <ul className="text-sm space-y-1">
+                                  <li>• All vital signs within normal range</li>
+                                  <li>• No significant abnormalities detected</li>
+                                  <li>• Recommended follow-up in 6 months</li>
+                                </ul>
                               </div>
-                              <div className="flex justify-between">
-                                <span>Provider:</span>
-                                <span>{healthRecords.find(r => r.id === selectedRecord)?.doctor}</span>
-                              </div>
-                              <div className="flex justify-between">
-                                <span>File Size:</span>
-                                <span>{healthRecords.find(r => r.id === selectedRecord)?.fileSize}</span>
-                              </div>
-                              <div className="flex justify-between">
-                                <span>Status:</span>
-                                <span>{healthRecords.find(r => r.id === selectedRecord)?.status}</span>
+                              
+                              <div>
+                                <h4 className="text-sm font-medium mb-2">Recommendations</h4>
+                                <ul className="text-sm space-y-1">
+                                  <li>• Continue current medication regimen</li>
+                                  <li>• Maintain healthy diet and exercise</li>
+                                  <li>• Schedule routine follow-up appointment</li>
+                                </ul>
                               </div>
                             </div>
-                          </div>
+                          </TabsContent>
                           
-                          <div>
-                            <h4 className="text-sm font-medium mb-2">Sharing Options</h4>
-                            <div className="space-y-2">
-                              <Button size="sm" variant="outline" className="w-full">
-                                Share with Doctor
-                              </Button>
-                              <Button size="sm" variant="outline" className="w-full">
-                                Generate Shareable Link
-                              </Button>
-                              <Button size="sm" variant="outline" className="w-full">
-                                Export to PDF
-                              </Button>
+                          <TabsContent value="details">
+                            <div className="space-y-4">
+                              <div>
+                                <h4 className="text-sm font-medium mb-2">Document Information</h4>
+                                <div className="text-sm space-y-2">
+                                  <div className="flex justify-between">
+                                    <span>Type:</span>
+                                    <span>{r.type}</span>
+                                  </div>
+                                  <div className="flex justify-between">
+                                    <span>Date:</span>
+                                    <span>{new Date(r.date || "").toLocaleDateString()}</span>
+                                  </div>
+                                  <div className="flex justify-between">
+                                    <span>Provider:</span>
+                                    <span>{r.doctor}</span>
+                                  </div>
+                                  <div className="flex justify-between">
+                                    <span>File Size:</span>
+                                    <span>{r.fileSize}</span>
+                                  </div>
+                                  <div className="flex justify-between">
+                                    <span>Status:</span>
+                                    <span>{r.status}</span>
+                                  </div>
+                                </div>
+                              </div>
+                              
+                              <div>
+                                <h4 className="text-sm font-medium mb-2">Sharing Options</h4>
+                                <div className="space-y-2">
+                                  <Button size="sm" variant="outline" className="w-full">
+                                    Share with Doctor
+                                  </Button>
+                                  <Button size="sm" variant="outline" className="w-full">
+                                    Generate Shareable Link
+                                  </Button>
+                                  <Button size="sm" variant="outline" className="w-full">
+                                    Export to PDF
+                                  </Button>
+                                </div>
+                              </div>
+                              
+                              <div>
+                                <h4 className="text-sm font-medium mb-2">Actions</h4>
+                                <div className="space-y-2">
+                                  <Button size="sm" className="w-full bg-green-600 hover:bg-green-700">
+                                    View Full Document
+                                  </Button>
+                                  <Button size="sm" variant="outline" className="w-full" onClick={() => r.summaryPdf && handleDownloadSummary(r.summaryPdf)}>
+                                    Download Summary PDF
+                                  </Button>
+                                  <Button size="sm" variant="outline" className="w-full text-red-600 hover:text-red-700">
+                                    Delete Record
+                                  </Button>
+                                </div>
+                              </div>
                             </div>
-                          </div>
-                          
-                          <div>
-                            <h4 className="text-sm font-medium mb-2">Actions</h4>
-                            <div className="space-y-2">
-                              <Button size="sm" className="w-full bg-green-600 hover:bg-green-700">
-                                View Full Document
-                              </Button>
-                              <Button size="sm" variant="outline" className="w-full">
-                                Download Original
-                              </Button>
-                              <Button size="sm" variant="outline" className="w-full text-red-600 hover:text-red-700">
-                                Delete Record
-                              </Button>
-                            </div>
-                          </div>
-                        </div>
-                      </TabsContent>
-                    </Tabs>
-                  </CardContent>
-                </Card>
+                          </TabsContent>
+                        </Tabs>
+                      </CardContent>
+                    </Card>
+                  ) : null;
+                })()
               ) : (
                 <Card className="flex flex-col items-center justify-center p-8 h-full">
                   <FileText className="h-12 w-12 text-gray-300 mb-4" />
@@ -320,7 +397,7 @@ export default function HealthRecords() {
             </div>
           </div>
         </TabsContent>
-        
+
         <TabsContent value="lab-results">
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {filteredRecords.filter(r => r.type === "Lab Results").map((record) => (
