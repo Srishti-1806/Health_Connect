@@ -7,6 +7,13 @@ import { Badge } from "@/components/ui/badge"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Progress } from "@/components/ui/progress"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar } from "recharts"
 import {
   Wind,
@@ -59,8 +66,34 @@ export default function AirQuality() {
   const [predictions, setPredictions] = useState<AQIData[]>([])
   const [timeSlots, setTimeSlots] = useState<TimeSlot[]>([])
   const [userConditions, setUserConditions] = useState<string[]>([])
-  const [location, setLocation] = useState("Delhi, India")
+  const [location, setLocation] = useState("delhi") // Simplified location format for WAQI API
+  const [locationDisplay, setLocationDisplay] = useState("Delhi, India")
   const [isLoading, setIsLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [useRealAPI, setUseRealAPI] = useState(true)
+
+  // WAQI API configuration
+  const WAQI_API_KEY = process.env.NEXT_PUBLIC_WAQI_API_KEY || "demo"
+  const WAQI_BASE_URL = "https://api.waqi.info"
+
+  // Popular cities for quick selection
+  const popularCities = [
+    { value: "delhi", label: "Delhi, India" },
+    { value: "mumbai", label: "Mumbai, India" },
+    { value: "bangalore", label: "Bangalore, India" },
+    { value: "kolkata", label: "Kolkata, India" },
+    { value: "chennai", label: "Chennai, India" },
+    { value: "hyderabad", label: "Hyderabad, India" },
+    { value: "pune", label: "Pune, India" },
+    { value: "beijing", label: "Beijing, China" },
+    { value: "shanghai", label: "Shanghai, China" },
+    { value: "london", label: "London, UK" },
+    { value: "paris", label: "Paris, France" },
+    { value: "new york", label: "New York, USA" },
+    { value: "los angeles", label: "Los Angeles, USA" },
+    { value: "tokyo", label: "Tokyo, Japan" },
+    { value: "singapore", label: "Singapore" },
+  ]
 
   // Load user respiratory conditions from localStorage
   useEffect(() => {
@@ -304,7 +337,7 @@ export default function AirQuality() {
     const recommendations: HealthRecommendation[] = []
 
     conditions.forEach((condition) => {
-      let severity: "mild" | "moderate" | "severe"
+      let severity: "mild" | "moderate" | "severe" = "mild" // Default value
       let recs: string[] = []
       let diet: string[] = []
       let precautions: string[] = []
@@ -397,18 +430,149 @@ export default function AirQuality() {
     return recommendations
   }
 
-  useEffect(() => {
-    setIsLoading(true)
+  // Fetch real-time AQI data from WAQI API
+  const fetchRealAQIData = async (cityName: string): Promise<AQIData | null> => {
+    try {
+      // Clean the city name - WAQI API prefers simple city names without country
+      const cleanCityName = cityName.toLowerCase().trim()
+      
+      const response = await fetch(`${WAQI_BASE_URL}/feed/${encodeURIComponent(cleanCityName)}/?token=${WAQI_API_KEY}`)
+      const data = await response.json()
 
-    // Simulate API calls
-    setTimeout(() => {
+      if (data.status !== "ok") {
+        console.error("WAQI API Error:", data)
+        throw new Error(data.data || "Failed to fetch AQI data")
+      }
+
+      const aqiData = data.data
+      const aqi = aqiData.aqi
+      const iaqi = aqiData.iaqi || {}
+      
+      // Update location display with actual station name if available
+      if (aqiData.city && aqiData.city.name) {
+        setLocationDisplay(aqiData.city.name)
+      }
+
+      return {
+        timestamp: new Date().toISOString().split("T")[0],
+        aqi: aqi,
+        pm25: iaqi.pm25?.v || 0,
+        pm10: iaqi.pm10?.v || 0,
+        o3: iaqi.o3?.v || 0,
+        no2: iaqi.no2?.v || 0,
+        so2: iaqi.so2?.v || 0,
+        co: iaqi.co?.v || 0,
+        category: getAQICategory(aqi),
+        color: getAQIColor(aqi),
+      }
+    } catch (error) {
+      console.error("Error fetching WAQI data:", error)
+      setError(`Unable to fetch data for "${cityName}". Try using just the city name (e.g., "delhi", "mumbai", "bangalore"). Using demo data.`)
+      return null
+    }
+  }
+
+  // Fetch historical AQI data
+  const fetchHistoricalData = async (currentData: AQIData): Promise<AQIData[]> => {
+    try {
+      // WAQI doesn't provide historical data in free tier, so we'll simulate it
+      // based on current data with some variation
+      const historical: AQIData[] = []
+      const today = new Date()
+
+      // Generate 9 days of historical data with variation
+      for (let i = 9; i >= 1; i--) {
+        const date = new Date(today)
+        date.setDate(date.getDate() - i)
+        
+        // Add some realistic variation to the AQI
+        const variation = (Math.random() - 0.5) * 40
+        const historicalAQI = Math.max(0, Math.round(currentData.aqi + variation))
+
+        historical.push({
+          timestamp: date.toISOString().split("T")[0],
+          aqi: historicalAQI,
+          pm25: Math.round(historicalAQI * 0.6),
+          pm10: Math.round(historicalAQI * 0.9),
+          o3: Math.round(historicalAQI * 0.3),
+          no2: Math.round(historicalAQI * 0.4),
+          so2: Math.round(historicalAQI * 0.15),
+          co: Math.round(historicalAQI * 0.008 * 100) / 100,
+          category: getAQICategory(historicalAQI),
+          color: getAQIColor(historicalAQI),
+        })
+      }
+
+      // Add today's REAL data as the last entry
+      historical.push(currentData)
+
+      return historical
+    } catch (error) {
+      console.error("Error fetching historical data:", error)
+      return mockAQIData
+    }
+  }
+
+  // Load AQI data (real or demo)
+  const loadAQIData = async () => {
+    setIsLoading(true)
+    setError(null)
+
+    try {
+      if (useRealAPI && WAQI_API_KEY !== "demo") {
+        // Fetch real data
+        const currentData = await fetchRealAQIData(location)
+
+        if (currentData) {
+          setCurrentAQI(currentData)
+          const historical = await fetchHistoricalData(currentData)
+          setHistoricalData(historical)
+          setPredictions(predictAQI(historical))
+          setTimeSlots(generateTimeSlots(currentData.aqi))
+        } else {
+          // Fallback to demo data
+          setHistoricalData(mockAQIData)
+          setCurrentAQI(mockAQIData[mockAQIData.length - 1])
+          setPredictions(predictAQI(mockAQIData))
+          setTimeSlots(generateTimeSlots(mockAQIData[mockAQIData.length - 1].aqi))
+        }
+      } else {
+        // Use demo data
+        setHistoricalData(mockAQIData)
+        setCurrentAQI(mockAQIData[mockAQIData.length - 1])
+        setPredictions(predictAQI(mockAQIData))
+        setTimeSlots(generateTimeSlots(mockAQIData[mockAQIData.length - 1].aqi))
+        
+        if (WAQI_API_KEY === "demo") {
+          setError("Using demo data. Add NEXT_PUBLIC_WAQI_API_KEY to .env.local for real-time data.")
+        }
+      }
+    } catch (error) {
+      console.error("Error loading AQI data:", error)
+      setError("Failed to load AQI data. Please check your internet connection.")
+      
+      // Fallback to demo data
       setHistoricalData(mockAQIData)
       setCurrentAQI(mockAQIData[mockAQIData.length - 1])
       setPredictions(predictAQI(mockAQIData))
       setTimeSlots(generateTimeSlots(mockAQIData[mockAQIData.length - 1].aqi))
+    } finally {
       setIsLoading(false)
-    }, 1000)
-  }, [])
+    }
+  }
+
+  useEffect(() => {
+    loadAQIData()
+  }, [location, useRealAPI])
+
+  // Auto-refresh every 30 minutes
+  useEffect(() => {
+    const interval = setInterval(() => {
+      loadAQIData()
+    }, 30 * 60 * 1000) // 30 minutes
+
+    return () => clearInterval(interval)
+  }, [location, useRealAPI])
 
   const getRecommendationColor = (rec: string) => {
     switch (rec) {
@@ -463,13 +627,71 @@ export default function AirQuality() {
           <h1 className="text-2xl font-bold tracking-tight text-white">Air Quality Monitor</h1>
           <p className="text-gray-400 flex items-center gap-2">
             <MapPin className="h-4 w-4" />
-            {location} • Last updated: {new Date().toLocaleTimeString()}
+            {locationDisplay} • Last updated: {new Date().toLocaleTimeString()}
+            {WAQI_API_KEY !== "demo" && useRealAPI && !error && (
+              <Badge variant="outline" className="ml-2 border-green-500 text-green-400">
+                Live Data
+              </Badge>
+            )}
+            {(WAQI_API_KEY === "demo" || !useRealAPI || error) && (
+              <Badge variant="outline" className="ml-2 border-yellow-500 text-yellow-400">
+                Demo Data
+              </Badge>
+            )}
           </p>
         </div>
-        <Button variant="outline" className="border-gray-600 text-gray-300 hover:bg-gray-700">
-          Change Location
-        </Button>
+        <div className="flex gap-2">
+          <Select value={location} onValueChange={(value) => setLocation(value)}>
+            <SelectTrigger className="w-[200px] border-gray-600 bg-gray-800 text-gray-300">
+              <SelectValue placeholder="Select city" />
+            </SelectTrigger>
+            <SelectContent className="bg-gray-800 border-gray-600">
+              {popularCities.map((city) => (
+                <SelectItem 
+                  key={city.value} 
+                  value={city.value}
+                  className="text-gray-300 focus:bg-gray-700 focus:text-white"
+                >
+                  {city.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Button 
+            variant="outline" 
+            className="border-gray-600 text-gray-300 hover:bg-gray-700"
+            onClick={() => loadAQIData()}
+            disabled={isLoading}
+          >
+            {isLoading ? "Refreshing..." : "Refresh Data"}
+          </Button>
+        </div>
       </div>
+
+      {/* API Error Alert */}
+      {error && (
+        <Alert className="border-2 bg-yellow-900/50 border-yellow-700">
+          <AlertTriangle className="h-4 w-4" />
+          <AlertTitle className="text-white">Notice</AlertTitle>
+          <AlertDescription className="text-gray-200">
+            {error}
+            {WAQI_API_KEY === "demo" && (
+              <span className="block mt-2">
+                Get a free API key from{" "}
+                <a
+                  href="https://aqicn.org/data-platform/token/"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-blue-400 underline hover:text-blue-300"
+                >
+                  aqicn.org
+                </a>{" "}
+                and add it to your .env.local file.
+              </span>
+            )}
+          </AlertDescription>
+        </Alert>
+      )}
 
       {/* Current AQI Alert */}
       {currentAQI && (

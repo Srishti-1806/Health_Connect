@@ -1,4 +1,5 @@
 "use client"
+import { useState, useEffect } from "react"
 import Link from "next/link"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
@@ -9,6 +10,48 @@ import { HealthMetricsChart } from "@/components/health-metrics-chart"
 import { RealClinicFinder } from "@/components/real-clinic-finder"
 
 export default function Dashboard() {
+  const [currentAQI, setCurrentAQI] = useState(163) // Default value
+  const [aqiCategory, setAqiCategory] = useState("Unhealthy - Stay indoors")
+  const [isLoadingAQI, setIsLoadingAQI] = useState(true)
+
+  const WAQI_API_KEY = process.env.NEXT_PUBLIC_WAQI_API_KEY || "demo"
+  const WAQI_BASE_URL = "https://api.waqi.info"
+
+  const getAQICategory = (aqi: number): string => {
+    if (aqi <= 50) return "Good - Enjoy outdoor activities"
+    if (aqi <= 100) return "Moderate - Acceptable"
+    if (aqi <= 150) return "Unhealthy for Sensitive Groups"
+    if (aqi <= 200) return "Unhealthy - Stay indoors"
+    if (aqi <= 300) return "Very Unhealthy - Avoid outdoors"
+    return "Hazardous - Stay inside"
+  }
+
+  useEffect(() => {
+    const fetchAQI = async () => {
+      if (WAQI_API_KEY === "demo") {
+        setIsLoadingAQI(false)
+        return
+      }
+
+      try {
+        const response = await fetch(`${WAQI_BASE_URL}/feed/delhi/?token=${WAQI_API_KEY}`)
+        const data = await response.json()
+
+        if (data.status === "ok") {
+          const aqi = data.data.aqi
+          setCurrentAQI(aqi)
+          setAqiCategory(getAQICategory(aqi))
+        }
+      } catch (error) {
+        console.error("Error fetching AQI for dashboard:", error)
+      } finally {
+        setIsLoadingAQI(false)
+      }
+    }
+
+    fetchAQI()
+  }, [])
+
   const openAIAssistant = () => {
     const event = new CustomEvent("openAIAssistant")
     window.dispatchEvent(event)
@@ -26,7 +69,11 @@ export default function Dashboard() {
         <AlertTriangle className="h-4 w-4 text-amber-400" />
         <AlertTitle className="text-amber-300">Health Alert</AlertTitle>
         <AlertDescription className="text-amber-200">
-          High AQI levels detected in your area (AQI: 163). Consider limiting outdoor activities today.
+          {currentAQI > 100 ? (
+            <>High AQI levels detected in your area (AQI: {currentAQI}). Consider limiting outdoor activities today.</>
+          ) : (
+            <>Air quality is acceptable (AQI: {currentAQI}). Enjoy your outdoor activities!</>
+          )}
         </AlertDescription>
       </Alert>
 
@@ -93,8 +140,10 @@ export default function Dashboard() {
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-sm font-medium text-orange-300">Air Quality</p>
-                <h3 className="text-lg font-bold text-orange-100">AQI: 163</h3>
-                <p className="text-sm text-orange-200">Unhealthy - Stay indoors</p>
+                <h3 className="text-lg font-bold text-orange-100">
+                  {isLoadingAQI ? "Loading..." : `AQI: ${currentAQI}`}
+                </h3>
+                <p className="text-sm text-orange-200">{aqiCategory}</p>
               </div>
               <Wind className="h-8 w-8 text-orange-400" />
             </div>
